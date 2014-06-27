@@ -1,0 +1,8 @@
+{% set val="" %}
+{% for i in vpc_pub_lb_subnets %}
+{% if loop.last %}
+{% set val = val + subnet_maps[i] %}
+{{ val }}
+{% endif %}
+{% set val = val + subnet_maps[i] + " " %}
+{% endfor %}
