@@ -1,0 +1,259 @@
+---
+#The playbook to provision vpc and their instnaces.
+
+- hosts: localhost
+  connection: local
+  vars: 
+   environ: stage
+   aws_creds:
+      AWS_DEFAULT_REGION: "{{ ec2_region }}"
+      AWS_ACCESS_KEY: "{{ ec2_access_key }}"
+      AWS_SECRET_KEY: "{{ ec2_secret_key }}" 
+      AWS_ACCESS_KEY_ID: "{{ ec2_access_key }}"
+      AWS_SECRET_ACCESS_KEY: "{{ ec2_secret_key }}"   
+  tasks:
+   - name: Install pip 
+     yum: name=python-pip state=installed
+
+   - name: Install the commandline tools for AWS
+     pip: name=awscli state=present
+   
+   - name: Include the variables specific to the vpc
+     include_vars: envs/{{ environ }}
+   
+   - name: Create the VPC 
+     local_action:
+        module: ec2_vpc
+        state: present
+        purge_routes: no
+        region: "{{ ec2_region }}"
+        resource_tags:
+            Environment: "{{ environ }}"
+            Name: "{{ vpc_name }}"
+        ec2_access_key: "{{ ec2_access_key }}"
+        ec2_secret_key: "{{ ec2_secret_key }}"
+        cidr_block: "{{ vpc_cidr_block }}"
+        subnets: "{{ vpc_subnets }}"
+        dns_support: true
+        dns_hostnames: true
+        internet_gateway: "{{ vpc_internet_gateway|string }}"
+        route_tables: "{{ vpc_route_tables_public }}"
+        wait: true
+     register: vpc
+
+   - name: Create the nat security group for the VPC
+     local_action:
+       module: ec2_group
+       name: "{{ vpc_nat_sec_group.name }}"
+       description: "{{ vpc_nat_sec_group.desc }}"
+       vpc_id: "{{ vpc.vpc_id }}"
+       region: "{{ ec2_region }}"
+       ec2_access_key: "{{ ec2_access_key }}"
+       ec2_secret_key: "{{ ec2_secret_key }}"
+       rules: "{{ vpc_nat_sec_group.rules }}"
+     register: public_nat_group
+   
+   - name: Create the NAT Instance
+     ec2:
+      assign_public_ip: true
+      group_id: "{{ public_nat_group.group_id }}"
+      region: "{{ ec2_region }}"
+      ec2_access_key: "{{ ec2_access_key }}"
+      ec2_secret_key: "{{ ec2_secret_key }}"
+      keypair: "{{ ec2_keypair }}"
+      instance_type: "{{ vpc_nat_instance_type }}"
+      instance_profile_name: "{{ nat_profile_name }}"
+      image: "{{ vpc_nat_instance_id }}"
+      vpc_subnet_id: "{{ item.id }}"
+      source_dest_check: false
+      wait: true
+      instance_tags: 
+        Name: "{{ environ + '_nat_instance1' }}"
+      exact_count: 1
+      count_tag: 
+        Name: "{{ environ + '_nat_instance1' }}"
+     register: ec2
+     with_items: vpc.subnets
+     when: vpc_internet_gateway and item['resource_tags']['Tier'] is defined and item['resource_tags']['Tier'] == 'Web-1c'
+   
+   - name: Set the fact for NAT Instance variable
+     set_fact: nat_instance1="{{ item.tagged_instances[0].id }}" nat_instance1_ip="{{ item.tagged_instances[0].public_ip }}"
+     with_items: ec2.results
+     when: item.tagged_instances is defined
+
+   - name: Create the NAT Instance 2
+     ec2:
+      assign_public_ip: true
+      group_id: "{{ public_nat_group.group_id }}"
+      region: "{{ ec2_region }}"
+      ec2_access_key: "{{ ec2_access_key }}"
+      ec2_secret_key: "{{ ec2_secret_key }}"
+      keypair: "{{ ec2_keypair }}"
+      instance_type: "{{ vpc_nat_instance_type }}"
+      instance_profile_name: "{{ nat_profile_name }}"
+      image: "{{ vpc_nat_instance_id }}"
+      vpc_subnet_id: "{{ item.id }}"
+      source_dest_check: false
+      wait: true
+      instance_tags: 
+        Name: "{{ environ + '_nat_instance2' }}"
+      exact_count: 1
+      count_tag: 
+        Name: "{{ environ + '_nat_instance2' }}"
+     register: ec2
+     with_items: vpc.subnets
+     when: vpc_internet_gateway and item['resource_tags']['Tier'] is defined and item['resource_tags']['Tier'] == 'Web-1b'
+
+
+   - name: Set the fact for NAT Instance variable
+     set_fact: nat_instance2="{{ item.tagged_instances[0].id }}" nat_instance2_ip="{{ item.tagged_instances[0].public_ip }}"
+     with_items: ec2.results
+     when: item.tagged_instances is defined
+
+   - name: Check if the route table for nat1 exists
+     shell: aws ec2 describe-route-tables --filters "Name=vpc-id,Values={{ vpc.vpc_id }}" --filters "Name=tag-value,Values=nat1route" | grep "nat1"
+     environment: aws_creds
+     register: check_rt1
+     ignore_errors: true
+   
+   - name: Create the route table for zone 1
+     shell: aws ec2 create-route-table --vpc-id={{ vpc.vpc_id }}
+     environment: aws_creds
+     register: rt
+     when: check_rt1.rc == 1
+   
+   - name: Set the routetable info as a fact
+     set_fact: 
+      rt_1: "{{ rt.stdout | from_json }}"
+     when: check_rt1.rc == 1
+
+   - name: Set tag for route table 1
+     local_action: 
+      module: ec2_tag 
+      resource: "{{ rt_1.RouteTable.RouteTableId }}" 
+      region: "{{ ec2_region }}" 
+      state: "present"
+      tags:
+       Name: "nat1route"
+     register: rt_tag1
+     when: check_rt1.rc == 1
+
+
+   - name: Set the gateway to nat interface 1.
+     shell: >
+        aws ec2 create-route --route-table-id {{ rt_1.RouteTable.RouteTableId }} --destination-cidr-block 0.0.0.0/0 --instance-id {{ nat_instance1 }}
+     environment: aws_creds
+     when: check_rt1.rc == 1
+
+   
+   - name: Check if the route table for nat2 exists
+     shell: aws ec2 describe-route-tables --filters "Name=vpc-id,Values={{ vpc.vpc_id }}" --filters "Name=tag-value,Values=nat2route" | grep "nat2"
+     environment: aws_creds
+     register: check_rt2
+     ignore_errors: true
+
+   - name: Create the route table for zone 2
+     shell: aws ec2 create-route-table --vpc-id={{ vpc.vpc_id }}
+     environment: aws_creds
+     register: rt
+     when: check_rt2.rc == 1
+   
+   - name: Set the routetable info as a fact
+     set_fact: 
+      rt_2: "{{ rt.stdout | from_json }}"
+     when: check_rt2.rc == 1
+   
+   - name: Set tag for route table 2
+     local_action: 
+      module: ec2_tag 
+      resource: "{{ rt_2.RouteTable.RouteTableId }}" 
+      region: "{{ ec2_region }}" 
+      state: "present"
+      tags:
+       Name: "nat2route"
+     register: rt_tag2
+     when: check_rt2.rc == 1
+
+   - name: Set the routetable info as a fact
+     set_fact:
+      rt_2: "{{ rt.stdout | from_json }}"
+     when: check_rt2.rc == 1
+
+
+   - name: Set the gateway to nat interface 2.
+     shell: > 
+        aws ec2 create-route --route-table-id {{ rt_2.RouteTable.RouteTableId }} --destination-cidr-block 0.0.0.0/0 --instance-id {{ nat_instance2 }}
+     environment: aws_creds
+     when: check_rt2.rc == 1
+
+   - name: Associate the zone1 private networks with the first route table
+     shell: aws ec2 associate-route-table --route-table-id {{ rt_1.RouteTable.RouteTableId }}  --subnet-id {{ item.id }}
+     with_items: vpc.subnets
+     when: (check_rt1.rc == 1 ) and (item.resource_tags.Network == 'Zone1-priv')
+     environment: aws_creds
+   
+   - name: Associate the zone2 private networks with the second route table
+     shell: aws ec2 associate-route-table --route-table-id {{ rt_2.RouteTable.RouteTableId }}  --subnet-id {{ item.id }}
+     with_items: vpc.subnets
+     when: (check_rt2.rc == 1 ) and (item.resource_tags.Network == 'Zone2-priv')
+     environment: aws_creds
+
+   - name: Create the security group for the VPC
+     ec2_group:
+       name: "{{ item.name }}"
+       description: "{{ item.desc }}"
+       vpc_id: "{{ vpc.vpc_id }}"
+       region: "{{ ec2_region }}"
+       ec2_access_key: "{{ ec2_access_key }}"
+       ec2_secret_key: "{{ ec2_secret_key }}"
+       rules: "{{ item.rules }}"
+     with_items: vpc_security_groups
+ 
+   - name: Add the nat host1 to inventory
+     add_host: name={{ nat_instance1_ip }} nat_role=primary groups="nat" nat_id={{ nat_instance2 }} nat_rt_id="{{ rt_2.RouteTable.RouteTableId }}" my_rt_id="{{ rt_1.RouteTable.RouteTableId }}"
+     when: check_rt1.rc == 1
+
+   - name: Add the nat host2 to inventory
+     add_host: name={{ nat_instance2_ip }} nat_role=secondary groups="nat" nat_id={{ nat_instance1 }} nat_rt_id={{ rt_1.RouteTable.RouteTableId }} my_rt_id={{ rt_2.RouteTable.RouteTableId }}
+     when: check_rt2.rc == 1
+
+   - name: Wait for the ssh to be available
+     wait_for: host={{ item }} port=22 state=started
+     with_items:
+       - "{{ nat_instance2_ip }}"
+       - "{{ nat_instance1_ip }}"
+
+#   - name: Create the Instance's for this vpc 
+#     ec2:
+#      region: "{{ ec2_region }}"
+#      ec2_access_key: "{{ ec2_access_key }}"
+#      ec2_secret_key: "{{ ec2_secret_key }}"
+#      keypair: "{{ item.keypair }}"
+#      assign_public_ip: "{{ item.assign_public_ip| default(False) }}"
+#      instance_type: "{{ item.instance_type }}"
+#      image: "{{ item.image }}"
+#      vpc_subnet_id: "{{ subnet_maps[item.subnet] }}"
+#      wait: true
+#      instance_tags: "{{ item.instance_tags }}"
+#      exact_count: "{{ item.exact_count }}"
+#      count_tag: "{{ item.count_tag }}"
+#      group: '{{ item.group }}'
+#     register: ec2
+#     with_items: vpc_instances
+
+- hosts: nat
+  remote_user: ec2-user
+  sudo: true
+  tasks:
+    - name: Copy the nat script  
+      template: src=templates/nat_monitor.sh.j2 dest=/root/nat_monitor.sh mode=0755 owner=root
+
+    - name: Crontab the script
+      copy: src=templates/nat_monitor dest=/etc/cron.d/nat_monitor mode=0755 owner=root
+    
+    - name: start the monitor job
+      shell: /root//nat_monitor.sh >> /tmp/nat_monitor.log &
+      async: 99999999999999
+      poll: 0
+      
+

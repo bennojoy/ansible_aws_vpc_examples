@@ -1,0 +1,137 @@
+---
+# The variables for dev vpc environment
+
+ec2_region: "us-east-1"
+vpc_name: benvpc
+vpc_cidr_block: 10.1.0.0/16
+nat_profile_name: "nat_test"
+vpc_subnets:
+    - cidr: 10.1.1.0/24
+      az: us-east-1c
+      resource_tags: { "Environment":"Stage", "Tier" : "Web-1c", "Network": "Zone1-pub" }
+    - cidr: 10.1.2.0/24
+      az: us-east-1c
+      resource_tags: { "Environment":"Stage", "Tier" : "App-1c", "Network": "Zone1-priv"  }
+    - cidr: 10.1.3.0/24
+      az: us-east-1c
+      resource_tags: { "Environment":"Stage", "Tier" : "Db-1c", "Network": "Zone1-priv"  }
+    - cidr: 10.1.4.0/24
+      az: us-east-1b
+      resource_tags: { "Environment":"Stage", "Tier" : "Web-1b", "Network": "Zone2-pub"  }
+    - cidr: 10.1.5.0/24
+      az: us-east-1b
+      resource_tags: { "Environment":"Stage", "Tier" : "App-1b", "Network": "Zone2-priv"  }
+    - cidr: 10.1.6.0/24
+      az: us-east-1b
+      resource_tags: { "Environment":"Stage", "Tier" : "Db-1b", "Network": "Zone2-priv"  }
+vpc_internet_gateway: "yes"
+vpc_route_tables_public:
+    - subnets:
+       - 10.1.1.0/24
+       - 10.1.4.0/24
+      routes:
+       - dest: 0.0.0.0/0
+         gw: igw
+
+vpc_nat_instance_id: ami-4f9fee26
+vpc_nat_instance_type: t1.micro
+
+# The variable for configuring security group and thier ingress rules
+
+vpc_nat_sec_group:
+   name: stage_vpc_nat_sec_group
+   desc: the public security group for the nat Instance
+   rules:
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        cidr_ip: "{{ vpc_cidr_block }}"
+      - proto: tcp
+        from_port: 443
+        to_port: 443
+        cidr_ip: "{{ vpc_cidr_block }}"
+      - proto: tcp
+        from_port: 22
+        to_port: 22
+        cidr_ip: 0.0.0.0/0
+
+vpc_security_groups:
+  - name: stage-web
+    desc: the security group for the web servers
+    rules:
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 443
+        to_port: 443
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 22
+        to_port: 22
+        cidr_ip: "{{ vpc_cidr_block }}"
+
+  - name: stage-app
+    desc: the security group for the app
+    rules:
+      - proto: tcp
+        from_port: 22
+        to_port: 22
+        cidr_ip: "{{ vpc_cidr_block }}"
+      - proto: tcp
+        from_port: 8080
+        to_port: 8080
+        cidr_ip: '10.1.1.0/24'
+
+  - name: stage-db
+    desc: the security group for the db 
+    rules:
+      - proto: tcp
+        from_port: 22
+        to_port: 22
+        cidr_ip: "{{ vpc_cidr_block }}"
+      - proto: tcp
+        from_port: 3128
+        to_port: 3128
+        cidr_ip: '10.1.2.0/24'
+
+# List of instances to be created in this environment.
+
+vpc_instances:
+  - instance_type: c1.medium
+    image: ami-7c807d14 
+    keypair: benkey
+    group: stage-web
+    assign_public_ip: true
+    instance_tags: 
+        Name: stage_web_server
+        env: stage
+    exact_count: 1
+    count_tag: 
+        Name: stage_web_server
+    subnet: 10.1.1.0/24
+  - instance_type: c1.medium
+    image: ami-7c807d14
+    keypair: benkey
+    group: stage-app
+    assign_public_ip: false
+    instance_tags: 
+        Name: stage_app_server
+        env: stage
+    exact_count: 1
+    count_tag: 
+        Name: stage_app_server
+    subnet: 10.1.2.0/24
+  - instance_type: c1.medium
+    image: ami-7c807d14
+    keypair: benkey
+    group: stage-db
+    assign_public_ip: false
+    instance_tags: 
+        Name: stage_db_server
+        env: stage
+    exact_count: 1
+    count_tag: 
+        Name: stage_db_server
+    subnet: 10.1.2.0/24
